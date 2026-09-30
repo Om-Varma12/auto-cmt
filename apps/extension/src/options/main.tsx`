@@ -1,0 +1,254 @@
+import React, { useState, useEffect } from 'react';
+import ReactDOM from 'react-dom/client';
+import { storage } from '../storage';
+import { Author, Paper } from '../shared/schemas';
+
+const Options = () => {
+  const [author, setAuthor] = useState<Author>({
+    email: '', firstName: '', lastName: '', organization: '', countryCode: ''
+  });
+  const [coAuthors, setCoAuthors] = useState<Author[]>([]);
+  const [papers, setPapers] = useState<Paper[]>([]);
+  const [newPaper, setNewPaper] = useState({ title: '', abstract: '' });
+
+  useEffect(() => {
+    storage.getAuthors().then(allAuthors => {
+      if (allAuthors.length > 0) {
+        setAuthor(allAuthors[0]);
+        setCoAuthors(allAuthors.slice(1));
+      }
+    });
+    storage.getPapers().then(setPapers);
+  }, []);
+
+  const saveAllAuthors = async (currentAuthor: Author, currentCoAuthors: Author[]) => {
+    const all = [currentAuthor, ...currentCoAuthors];
+    await storage.saveAuthors(all);
+  };
+
+  const handleAddCoAuthor = () => {
+    const newCo: Author = {
+      email: '', firstName: '', lastName: '',
+      organization: author.organization,
+      countryCode: author.countryCode
+    };
+    const updated = [...coAuthors, newCo];
+    setCoAuthors(updated);
+    saveAllAuthors(author, updated);
+  };
+
+  const updateCoAuthor = (index: number, field: keyof Author, value: string) => {
+    const updated = [...coAuthors];
+    updated[index] = { ...updated[index], [field]: value };
+    setCoAuthors(updated);
+    saveAllAuthors(author, updated);
+  };
+
+  const addPaper = async () => {
+    const updated = [...papers, {
+      id: crypto.randomUUID(),
+      title: newPaper.title,
+      abstract: newPaper.abstract,
+      keywords: [],
+      fullText: '',
+      authorIds: [],
+      primaryContactId: ''
+    }];
+    setPapers(updated);
+    await storage.savePapers(updated);
+    setNewPaper({ title: '', abstract: '' });
+  };
+
+  // Styles
+  const containerStyle: React.CSSProperties = {
+    padding: '3rem 2rem',
+    fontFamily: '"Inter", system-ui, -apple-system, sans-serif',
+    maxWidth: '850px',
+    margin: '0 auto',
+    color: '#1a1a1a',
+    backgroundColor: '#fafafa',
+    minHeight: '100vh'
+  };
+
+  const sectionStyle: React.CSSProperties = {
+    backgroundColor: '#ffffff',
+    borderRadius: '12px',
+    padding: '2rem',
+    marginBottom: '2rem',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.05)',
+    border: '1px solid #eee'
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '12px 16px',
+    fontSize: '1rem',
+    borderRadius: '8px',
+    border: '1px solid #ddd',
+    marginBottom: '1rem',
+    boxSizing: 'border-box',
+    transition: 'border-color 0.2s',
+    outline: 'none'
+  };
+
+  const labelStyle: React.CSSProperties = {
+    display: 'block',
+    fontWeight: '600',
+    marginBottom: '0.5rem',
+    fontSize: '0.9rem',
+    color: '#666'
+  };
+
+  const btnPrimaryStyle: React.CSSProperties = {
+    backgroundColor: '#007bff',
+    color: 'white',
+    padding: '12px 24px',
+    borderRadius: '8px',
+    border: 'none',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background 0.2s'
+  };
+
+  return (
+    <div style={containerStyle}>
+      <header style={{ textAlign: 'center', marginBottom: '3rem' }}>
+        <h1 style={{ fontSize: '2.5rem', fontWeight: '800', marginBottom: '0.5rem' }}>CMT Autofill</h1>
+        <p style={{ color: '#666' }}>Configure your submission profile for seamless filling</p>
+      </header>
+
+      {/* MAIN AUTHOR SECTION */}
+      <section style={sectionStyle}>
+        <h2 style={{ marginTop: 0, marginBottom: '1.5rem', borderBottom: '2px solid #007bff', display: 'inline-block' }}>Primary Author</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div>
+            <label style={labelStyle}>Email</label>
+            <input style={inputStyle} value={author.email} onChange={e => {
+              const a = {...author, email: e.target.value};
+              setAuthor(a);
+              saveAllAuthors(a, coAuthors);
+            }} />
+          </div>
+          <div>
+            <label style={labelStyle}>First Name</label>
+            <input style={inputStyle} value={author.firstName} onChange={e => {
+              const a = {...author, firstName: e.target.value};
+              setAuthor(a);
+              saveAllAuthors(a, coAuthors);
+            }} />
+          </div>
+          <div>
+            <label style={labelStyle}>Last Name</label>
+            <input style={inputStyle} value={author.lastName} onChange={e => {
+              const a = {...author, lastName: e.target.value};
+              setAuthor(a);
+              saveAllAuthors(a, coAuthors);
+            }} />
+          </div>
+          <div>
+            <label style={labelStyle}>Organization</label>
+            <input style={inputStyle} value={author.organization} onChange={e => {
+              const a = {...author, organization: e.target.value};
+              setAuthor(a);
+              saveAllAuthors(a, coAuthors);
+            }} />
+          </div>
+          <div style={{ gridColumn: 'span 2' }}>
+            <label style={labelStyle}>Country</label>
+            <input style={inputStyle} value={author.countryCode} onChange={e => {
+              const a = {...author, countryCode: e.target.value};
+              setAuthor(a);
+              saveAllAuthors(a, coAuthors);
+            }} />
+          </div>
+        </div>
+      </section>
+
+      {/* CO-AUTHORS SECTION */}
+      <section style={sectionStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <h2 style={{ marginTop: 0, borderBottom: '2px solid #007bff', display: 'inline-block' }}>Co-Authors</h2>
+          <button onClick={handleAddCoAuthor} style={btnPrimaryStyle}>+ Add Co-Author</button>
+        </div>
+
+        {coAuthors.length === 0 && <p style={{ color: '#999', textAlign: 'center' }}>No co-authors added yet.</p>}
+
+        <div style={{ display: 'grid', gap: '2rem' }}>
+          {coAuthors.map((co, index) => (
+            <div key={index} style={{ padding: '1.5rem', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '1px solid #eee' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                <div>
+                  <label style={labelStyle}>Email</label>
+                  <input style={inputStyle} value={co.email} onChange={e => updateCoAuthor(index, 'email', e.target.value)} />
+                </div>
+                <div>
+                  <label style={labelStyle}>First Name</label>
+                  <input style={inputStyle} value={co.firstName} onChange={e => updateCoAuthor(index, 'firstName', e.target.value)} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Last Name</label>
+                  <input style={inputStyle} value={co.lastName} onChange={e => updateCoAuthor(index, 'lastName', e.target.value)} />
+                </div>
+                <div>
+                  <label style={labelStyle}>Organization</label>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input style={{ ...inputStyle, marginBottom: '0' }} value={co.organization} onChange={e => updateCoAuthor(index, 'organization', e.target.value)} />
+                    <button
+                      style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', cursor: 'pointer' }}
+                      onClick={() => updateCoAuthor(index, 'organization', author.organization)}
+                    >
+                      Same as Author
+                    </button>
+                  </div>
+                </div>
+                <div style={{ gridColumn: 'span 2' }}>
+                  <label style={labelStyle}>Country</label>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input style={{ ...inputStyle, marginBottom: '0' }} value={co.countryCode} onChange={e => updateCoAuthor(index, 'countryCode', e.target.value)} />
+                    <button
+                      style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', cursor: 'pointer' }}
+                      onClick={() => updateCoAuthor(index, 'countryCode', author.countryCode)}
+                    >
+                      Same as Author
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* PAPER SECTION */}
+      <section style={sectionStyle}>
+        <h2 style={{ marginTop: 0, marginBottom: '1.5rem', borderBottom: '2px solid #007bff', display: 'inline-block' }}>Paper Details</h2>
+        <div style={{ display: 'grid', gap: '1rem' }}>
+          <div>
+            <label style={labelStyle}>Paper Title</label>
+            <input style={inputStyle} value={newPaper.title} onChange={e => setNewPaper({...newPaper, title: e.target.value})} />
+          </div>
+          <div>
+            <label style={labelStyle}>Abstract</label>
+            <textarea
+              style={{ ...inputStyle, height: '150px', resize: 'vertical' }}
+              value={newPaper.abstract}
+              onChange={e => setNewPaper({...newPaper, abstract: e.target.value})}
+            />
+          </div>
+          <button onClick={addPaper} style={btnPrimaryStyle}>Save Paper</button>
+        </div>
+
+        <div style={{ marginTop: '2rem' }}>
+          <h3 style={{ fontSize: '1rem', color: '#666' }}>Saved Papers</h3>
+          <ul style={{ listStyle: 'none', padding: 0 }}>
+            {papers.map((p, i) => (
+              <li key={i} style={{ padding: '0.5rem 0', borderBottom: '1px solid #eee' }}>{p.title}</li>
+            ))}
+          </ul>
+        </div>
+      </section>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')!).render(<Options />);
