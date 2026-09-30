@@ -13,14 +13,9 @@
     "turbo": "^2.11.5",
     "typescript": "7.0.2"
   },
+  "packageManager": "npm@10.9.3",
   "engines": {
-    "node": ">=24"
-  },
-  "devEngines": {
-    "packageManager": {
-      "name": "npm",
-      "version": "11.7.0"
-    }
+    "node": ">=18"
   },
   "workspaces": [
     "apps/*",

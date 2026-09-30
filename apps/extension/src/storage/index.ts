@@ -1,4 +1,4 @@
-import { Author, Paper, ExtensionSettings } from './schemas';
+import { Author, Paper, ExtensionSettings } from '../shared/schemas';
 
 export const storage = {
   async getAuthors(): Promise<Author[]> {

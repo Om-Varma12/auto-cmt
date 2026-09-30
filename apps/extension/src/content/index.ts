@@ -41,7 +41,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error('Filling error:', err);
         sendResponse({ status: 'error', error: err.message });
       }
-    }).catch(err: any => {
+    }).catch((err: any) => {
       console.error('Storage error:', err);
       sendResponse({ status: 'error', error: err.message });
     });
