@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { storage } from '../storage';
+import { savePdfBlob, deletePdfBlob } from '../storage/indexed-db';
 import { Author, Paper, ExtensionSettings } from '../shared/schemas';
 
 const Options = () => {
-  const [authors, setAuthors] = useState<Author[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [settings, setSettings] = useState<ExtensionSettings>({ backendBaseUrl: 'http://localhost:3001' });
+  const [selectedPaperId, setSelectedPaperId] = useState<string | null>(null);
+  const [settings, setSettings] = useState<ExtensionSettings>({ backendBaseUrl: 'http://localhost:3001', autoUploadPdf: false });
 
   // PDF Upload & Extraction State
   const [isExtracting, setIsExtracting] = useState(false);
+  const [currentPendingFile, setCurrentPendingFile] = useState<File | null>(null);
   const [extractedData, setExtractedData] = useState<{
     title: string;
     abstract: string;
@@ -20,8 +22,17 @@ const Options = () => {
   const [notification, setNotification] = useState<string | null>(null);
 
   useEffect(() => {
-    storage.getAuthors().then(setAuthors);
-    storage.getPapers().then(setPapers);
+    storage.getPapers().then(loadedPapers => {
+      setPapers(loadedPapers);
+      storage.getSelectedPaperId().then(selectedId => {
+        if (selectedId && loadedPapers.some(p => p.id === selectedId)) {
+          setSelectedPaperId(selectedId);
+        } else if (loadedPapers.length > 0) {
+          setSelectedPaperId(loadedPapers[0].id);
+          storage.setSelectedPaperId(loadedPapers[0].id);
+        }
+      });
+    });
     storage.getSettings().then(setSettings);
   }, []);
 
@@ -40,6 +51,7 @@ const Options = () => {
       return;
     }
 
+    setCurrentPendingFile(file);
     setIsExtracting(true);
     setNotification('Extracting paper metadata and authors using AI...');
 
@@ -71,7 +83,7 @@ const Options = () => {
               organization: a.organization || '',
               countryCode: a.countryCode || 'India',
             })),
-            primaryAuthorIndex: 0, // default first author as primary
+            primaryAuthorIndex: 0,
           });
           showToast('✓ PDF processed! Review and edit the details below.');
         }
@@ -128,31 +140,76 @@ const Options = () => {
       return;
     }
 
+    const newPaperId = 'paper_' + Date.now();
+
+    // Persist PDF Blob into IndexedDB under newPaperId
+    if (currentPendingFile) {
+      await savePdfBlob(newPaperId, currentPendingFile, currentPendingFile.name).catch(err => {
+        console.warn('[OPTIONS] Failed to save PDF Blob to IndexedDB:', err);
+      });
+    }
+
     const primaryAuthor = extractedData.authors[extractedData.primaryAuthorIndex] || extractedData.authors[0];
 
-    const paperToSave: Paper = {
+    const newPaper: Paper = {
+      id: newPaperId,
       title: extractedData.title,
       abstract: extractedData.abstract,
       keywords: [],
       fullText: '',
-      authorIds: extractedData.authors.map(a => a.email),
+      authors: extractedData.authors,
       primaryContactId: primaryAuthor.email,
+      createdAt: Date.now(),
     };
 
-    setAuthors(extractedData.authors);
-    setPapers([paperToSave]);
+    const updatedPapers = [newPaper, ...papers];
+    setPapers(updatedPapers);
+    setSelectedPaperId(newPaperId);
 
-    await storage.saveAuthors(extractedData.authors);
-    await storage.savePapers([paperToSave]);
+    await storage.savePapers(updatedPapers);
+    await storage.setSelectedPaperId(newPaperId);
 
-    showToast('✓ Saved paper & authors to storage successfully!');
+    showToast(`✓ "${newPaper.title}" saved and set as active paper!`);
     setExtractedData(null);
+    setCurrentPendingFile(null);
+  };
+
+  // Select active paper for automation
+  const selectActivePaper = async (paperId: string) => {
+    setSelectedPaperId(paperId);
+    await storage.setSelectedPaperId(paperId);
+    const targetPaper = papers.find(p => p.id === paperId);
+    showToast(`⭐ Selected "${targetPaper?.title || 'Paper'}" for automation execution`);
+  };
+
+  // Remove a paper from history
+  const removePaper = async (paperId: string) => {
+    const updatedPapers = papers.filter(p => p.id !== paperId);
+    setPapers(updatedPapers);
+    await storage.savePapers(updatedPapers);
+    await deletePdfBlob(paperId).catch(() => {});
+
+    if (selectedPaperId === paperId) {
+      const nextId = updatedPapers.length > 0 ? updatedPapers[0].id : null;
+      setSelectedPaperId(nextId);
+      if (nextId) await storage.setSelectedPaperId(nextId);
+      else await chrome.storage.local.remove('selectedPaperId');
+    }
+
+    showToast('Paper removed from library');
   };
 
   const updateBackendUrl = async (url: string) => {
     const updated = { ...settings, backendBaseUrl: url };
     setSettings(updated);
     await storage.saveSettings(updated);
+  };
+
+  const updateAutoUploadPdf = async (autoUpload: boolean) => {
+    const updated = { ...settings, autoUploadPdf: autoUpload };
+    setSettings(updated);
+    await storage.saveSettings(updated);
+    showToast(`PDF Auto-Attach is now ${autoUpload ? 'ON' : 'OFF'}`);
   };
 
   return (
@@ -179,7 +236,7 @@ const Options = () => {
               CMT Autofill Settings
             </h1>
             <p style={{ color: '#64748b', fontSize: '0.9rem', marginTop: '0.25rem', margin: 0 }}>
-              Upload your research paper PDF to auto-extract authors, title, and abstract
+              Manage paper submissions, authors, and select active paper for automation
             </p>
           </div>
           <span style={{
@@ -382,12 +439,12 @@ const Options = () => {
               onClick={saveExtractedPaperAndAuthors}
               style={{ ...primaryButtonStyle, width: '100%', padding: '0.875rem', fontSize: '1rem' }}
             >
-              💾 Save Paper & Authors to Storage
+              💾 Save Paper & Set as Active for Automation
             </button>
           </section>
         )}
 
-        {/* STEP 3: Current Saved Paper & Authors */}
+        {/* STEP 3: Papers Library & Active Selection */}
         <section style={{
           backgroundColor: '#ffffff',
           borderRadius: '0.75rem',
@@ -396,61 +453,127 @@ const Options = () => {
           border: '1px solid #e2e8f0',
           boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
         }}>
-          <h2 style={{ fontSize: '1.15rem', fontWeight: '600', color: '#1e293b', marginTop: 0, marginBottom: '1rem' }}>
-            📋 Saved Active Paper & Authors
+          <h2 style={{ fontSize: '1.15rem', fontWeight: '600', color: '#1e293b', marginTop: 0, marginBottom: '0.375rem' }}>
+            📚 Papers Library ({papers.length})
           </h2>
+          <p style={{ color: '#64748b', fontSize: '0.85rem', marginTop: 0, marginBottom: '1.25rem' }}>
+            Select which paper you want the CMT automation to execute for.
+          </p>
 
           {papers.length === 0 ? (
             <p style={{ color: '#94a3b8', fontSize: '0.9rem', fontStyle: 'italic' }}>
-              No active paper saved yet. Upload a PDF above to get started.
+              No papers saved in library yet. Upload a PDF above to add your first paper.
             </p>
           ) : (
-            <div>
-              <div style={{ padding: '1rem', borderRadius: '0.5rem', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: '1rem' }}>
-                <h3 style={{ fontSize: '1.05rem', fontWeight: '600', color: '#0f172a', margin: 0 }}>
-                  {papers[0].title}
-                </h3>
-                {papers[0].abstract && (
-                  <p style={{ fontSize: '0.85rem', color: '#475569', marginTop: '0.5rem', marginBottom: 0 }}>
-                    {papers[0].abstract}
-                  </p>
-                )}
-              </div>
-
-              <h4 style={{ fontSize: '0.95rem', fontWeight: '600', color: '#334155', marginBottom: '0.5rem' }}>
-                Authors ({authors.length}):
-              </h4>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                {authors.map((a, idx) => (
-                  <div key={idx} style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '0.625rem 0.875rem',
-                    borderRadius: '0.375rem',
-                    backgroundColor: '#ffffff',
-                    border: '1px solid #e2e8f0'
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {papers.map((p) => {
+                const isSelected = selectedPaperId === p.id;
+                return (
+                  <div key={p.id} style={{
+                    padding: '1.25rem',
+                    borderRadius: '0.625rem',
+                    backgroundColor: isSelected ? '#f0fdf4' : '#f8fafc',
+                    border: isSelected ? '2px solid #22c55e' : '1px solid #e2e8f0',
+                    boxShadow: isSelected ? '0 2px 4px rgba(34, 197, 94, 0.1)' : 'none',
+                    transition: 'all 0.15s ease'
                   }}>
-                    <div>
-                      <span style={{ fontWeight: '600', color: '#0f172a' }}>{a.firstName} {a.lastName}</span>
-                      <span style={{ color: '#64748b', fontSize: '0.85rem', marginLeft: '0.5rem' }}>({a.email})</span>
-                      <span style={{ display: 'block', fontSize: '0.8rem', color: '#64748b' }}>
-                        {a.organization} {a.countryCode ? `• ${a.countryCode}` : ''}
-                      </span>
+                    {/* Top Row: Title & Action Buttons */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <h3 style={{ fontSize: '1.05rem', fontWeight: '700', color: '#0f172a', margin: 0 }}>
+                          {p.title}
+                        </h3>
+                        {isSelected && (
+                          <span style={{
+                            fontSize: '0.75rem',
+                            backgroundColor: '#22c55e',
+                            color: '#ffffff',
+                            fontWeight: '700',
+                            padding: '0.2rem 0.6rem',
+                            borderRadius: '9999px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.25rem'
+                          }}>
+                            ⭐ Active for Automation
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        {!isSelected ? (
+                          <button
+                            type="button"
+                            onClick={() => selectActivePaper(p.id)}
+                            style={smallPrimaryButtonStyle}
+                          >
+                            Select for Automation
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: '0.8rem', color: '#16a34a', fontWeight: '600', alignSelf: 'center' }}>
+                            Currently Active
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removePaper(p.id)}
+                          style={deleteButtonStyle}
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
-                    {a.email === papers[0]?.primaryContactId && (
-                      <span style={{ fontSize: '0.75rem', backgroundColor: '#dcfce7', color: '#15803d', fontWeight: '600', padding: '0.2rem 0.5rem', borderRadius: '0.25rem' }}>
-                        Primary Author
-                      </span>
+
+                    {/* Abstract snippet */}
+                    {p.abstract && (
+                      <p style={{
+                        fontSize: '0.85rem',
+                        color: '#475569',
+                        marginTop: 0,
+                        marginBottom: '0.875rem',
+                        lineClamp: 2,
+                        display: '-webkit-box',
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden'
+                      }}>
+                        {p.abstract}
+                      </p>
+                    )}
+
+                    {/* Authors List */}
+                    {p.authors && p.authors.length > 0 && (
+                      <div>
+                        <span style={{ fontSize: '0.8rem', fontWeight: '600', color: '#475569' }}>
+                          Authors ({p.authors.length}):
+                        </span>
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.375rem' }}>
+                          {p.authors.map((auth, aIdx) => {
+                            const isPrimary = auth.email === p.primaryContactId;
+                            return (
+                              <span key={aIdx} style={{
+                                fontSize: '0.75rem',
+                                padding: '0.25rem 0.625rem',
+                                borderRadius: '0.375rem',
+                                backgroundColor: isPrimary ? '#dcfce7' : '#e2e8f0',
+                                color: isPrimary ? '#15803d' : '#334155',
+                                fontWeight: isPrimary ? '600' : '400',
+                                border: isPrimary ? '1px solid #86efac' : 'none'
+                              }}>
+                                {auth.firstName} {auth.lastName} {isPrimary ? '⭐ (Primary)' : ''}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
                     )}
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
           )}
         </section>
 
-        {/* Backend Configuration Card */}
+        {/* Backend & Upload Settings Card */}
         <section style={{
           backgroundColor: '#ffffff',
           borderRadius: '0.75rem',
@@ -458,18 +581,47 @@ const Options = () => {
           border: '1px solid #e2e8f0',
           boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
         }}>
-          <h2 style={{ fontSize: '1.15rem', fontWeight: '600', color: '#1e293b', marginTop: 0, marginBottom: '0.75rem' }}>
-            Backend Configuration
+          <h2 style={{ fontSize: '1.15rem', fontWeight: '600', color: '#1e293b', marginTop: 0, marginBottom: '1rem' }}>
+            Extension & Attachment Settings
           </h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <label style={{ fontSize: '0.85rem', fontWeight: '500', color: '#475569' }}>Backend Base URL</label>
-            <input
-              type="url"
-              value={settings.backendBaseUrl}
-              onChange={e => updateBackendUrl(e.target.value)}
-              placeholder="http://localhost:3001"
-              style={inputStyle}
-            />
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+              <label style={{ fontSize: '0.85rem', fontWeight: '500', color: '#475569' }}>Backend Base URL</label>
+              <input
+                type="url"
+                value={settings.backendBaseUrl}
+                onChange={e => updateBackendUrl(e.target.value)}
+                placeholder="http://localhost:3001"
+                style={inputStyle}
+              />
+            </div>
+
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '0.875rem 1rem',
+              borderRadius: '0.5rem',
+              backgroundColor: '#f8fafc',
+              border: '1px solid #e2e8f0'
+            }}>
+              <div>
+                <label style={{ fontWeight: '600', color: '#0f172a', fontSize: '0.9rem', cursor: 'pointer' }}>
+                  Automatically attach PDF during Execute
+                </label>
+                <p style={{ color: '#64748b', fontSize: '0.8rem', margin: '0.125rem 0 0 0' }}>
+                  Attempts to auto-attach active paper PDF to CMT form when clicking Execute (Default: OFF)
+                </p>
+              </div>
+
+              <input
+                type="checkbox"
+                checked={settings.autoUploadPdf ?? false}
+                onChange={e => updateAutoUploadPdf(e.target.checked)}
+                style={{ width: '20px', height: '20px', cursor: 'pointer' }}
+              />
+            </div>
           </div>
         </section>
 

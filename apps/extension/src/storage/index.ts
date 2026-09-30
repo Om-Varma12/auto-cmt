@@ -15,9 +15,16 @@ export const storage = {
   async savePapers(papers: Paper[]): Promise<void> {
     await chrome.storage.local.set({ papers });
   },
+  async getSelectedPaperId(): Promise<string | null> {
+    const data = await chrome.storage.local.get('selectedPaperId');
+    return data.selectedPaperId || null;
+  },
+  async setSelectedPaperId(selectedPaperId: string): Promise<void> {
+    await chrome.storage.local.set({ selectedPaperId });
+  },
   async getSettings(): Promise<ExtensionSettings> {
     const data = await chrome.storage.local.get('settings');
-    return data.settings || { backendBaseUrl: 'http://localhost:3001' };
+    return data.settings || { backendBaseUrl: 'http://localhost:3001', autoUploadPdf: false };
   },
   async saveSettings(settings: ExtensionSettings): Promise<void> {
     await chrome.storage.local.set({ settings });
