@@ -387,7 +387,7 @@ Example logical payload:
 
 ```json
 {
-  "model": "gemma4:31b",
+  "model": "gemma4:31b:cloud",
   "messages": [
     {"role": "system", "content": "..."},
     {"role": "user", "content": "..."}
