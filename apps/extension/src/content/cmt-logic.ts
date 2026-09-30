@@ -17,6 +17,24 @@ function setInputValue(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectEl
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
+function setSelectValue(selectEl: HTMLSelectElement, value: string) {
+  const options = Array.from(selectEl.options);
+  const matchedOpt = options.find(
+    o => o.value === value || o.value.toLowerCase() === value.toLowerCase()
+  );
+  if (matchedOpt) {
+    matchedOpt.selected = true;
+    selectEl.value = matchedOpt.value;
+  } else {
+    setInputValue(selectEl, value);
+    return;
+  }
+
+  selectEl.dispatchEvent(new Event('input', { bubbles: true }));
+  selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+  selectEl.dispatchEvent(new Event('blur', { bubbles: true }));
+}
+
 function setChecked(el: HTMLInputElement, want: boolean) {
   if (el.checked !== want) el.click();
 }
@@ -45,18 +63,19 @@ function waitForElement<T extends Element>(selector: string, timeoutMs = 5000): 
  *   1. Option value (country code) exact match — e.g. "IN", "in" -> "IN"
  *   2. Option text (country name) exact match — e.g. "India" -> "IN"
  *   3. Option text starts with input — e.g. "United" -> "United States" -> "US"
- *   4. Input starts with option text  — handles partial input
+ *   4. Input starts with option text — handles "United States of America" -> "US"
  *   5. Option text contains input
+ *   6. Input contains option text
  */
 function matchCountryOption(selectEl: HTMLSelectElement, input: string): string | null {
   if (!input?.trim()) return null;
   const lower = input.trim().toLowerCase();
   const opts = Array.from(selectEl.options).filter(o => o.value !== '');
 
-  const byValue     = opts.find(o => o.value.toLowerCase() === lower);
+  const byValue = opts.find(o => o.value.toLowerCase() === lower);
   if (byValue) return byValue.value;
 
-  const byText      = opts.find(o => o.text.trim().toLowerCase() === lower);
+  const byText = opts.find(o => o.text.trim().toLowerCase() === lower);
   if (byText) return byText.value;
 
   const byTextStart = opts.find(o => o.text.trim().toLowerCase().startsWith(lower));
@@ -65,8 +84,11 @@ function matchCountryOption(selectEl: HTMLSelectElement, input: string): string 
   const byInputStart = opts.find(o => lower.startsWith(o.text.trim().toLowerCase()));
   if (byInputStart) return byInputStart.value;
 
-  const byContains  = opts.find(o => o.text.trim().toLowerCase().includes(lower));
+  const byContains = opts.find(o => o.text.trim().toLowerCase().includes(lower));
   if (byContains) return byContains.value;
+
+  const byInputContains = opts.find(o => lower.includes(o.text.trim().toLowerCase()));
+  if (byInputContains) return byInputContains.value;
 
   return null;
 }
@@ -74,7 +96,6 @@ function matchCountryOption(selectEl: HTMLSelectElement, input: string): string 
 /**
  * Find the country <select> inside a form.
  * CMT wraps it in a div.form-select-wrapper, and adds data-wrapped="".
- * We use aria-label="Country/Region" as the most reliable selector.
  */
 function findCountrySelect(form: HTMLFormElement): HTMLSelectElement | null {
   return (
@@ -153,9 +174,9 @@ async function addAuthor(author: Author): Promise<boolean> {
   const emailInput = form.querySelector<HTMLInputElement>('input[placeholder="Email"]');
   if (emailInput) {
     setInputValue(emailInput, author.email);
-    emailInput.dispatchEvent(new Event('blur', { bubbles: true })); // trigger email validation
+    emailInput.dispatchEvent(new Event('blur', { bubbles: true }));
   }
-  await sleep(400); // CMT validates email asynchronously
+  await sleep(400);
 
   // — First Name —
   const firstInput = form.querySelector<HTMLInputElement>('input[placeholder="First Name"]');
@@ -170,12 +191,9 @@ async function addAuthor(author: Author): Promise<boolean> {
   if (orgInput) setInputValue(orgInput, author.organization);
 
   // — Country/Region —
-  // CMT wraps the <select> inside div.form-select-wrapper with data-wrapped="".
-  // We wait up to 1s for options to be populated by Knockout before matching.
   if (author.countryCode) {
     const countrySelect = findCountrySelect(form);
     if (countrySelect) {
-      // Wait for Knockout to populate options if they haven't loaded yet
       let waited = 0;
       while (countrySelect.options.length <= 1 && waited < 1000) {
         await sleep(100);
@@ -184,9 +202,7 @@ async function addAuthor(author: Author): Promise<boolean> {
 
       const matchedValue = matchCountryOption(countrySelect, author.countryCode);
       if (matchedValue) {
-        setInputValue(countrySelect, matchedValue);
-        // Also dispatch 'blur' to trigger Knockout validation
-        countrySelect.dispatchEvent(new Event('blur', { bubbles: true }));
+        setSelectValue(countrySelect, matchedValue);
         console.log(`[CMT FILLER] Country "${author.countryCode}" -> matched "${matchedValue}"`);
       } else {
         console.warn(`[CMT FILLER] No match for country "${author.countryCode}" in select (${countrySelect.options.length} options)`);
@@ -198,12 +214,10 @@ async function addAuthor(author: Author): Promise<boolean> {
 
   await sleep(200);
 
-  // Click the inline form's "Add" (submit) button only.
-  // This is the small "+ Add" button INSIDE the author inline form, NOT the main CMT submit.
-  // We never click the main CMT form's submit button.
+  // Click the inline form's "+ Add" button inside the author form
   const addSubmitBtn = form.querySelector<HTMLButtonElement>('button[type="submit"]');
   if (!addSubmitBtn) {
-    console.warn('[CMT FILLER] Add submit button not found inside author form — cannot add author');
+    console.warn('[CMT FILLER] Add submit button not found inside author form');
     return false;
   }
   addSubmitBtn.click();
@@ -217,10 +231,9 @@ async function addAuthor(author: Author): Promise<boolean> {
       console.log(`[CMT FILLER] Successfully added author: ${author.email}`);
       return true;
     }
-    if (!document.querySelector('form.form-inline')) break; // form closed
+    if (!document.querySelector('form.form-inline')) break;
   }
 
-  // Final check by email presence
   const finalEmails = Array.from(
     document.querySelectorAll('[id^="autorEmailCell-"]')
   ).map(el => el.textContent?.trim().toLowerCase() ?? '');
@@ -325,7 +338,7 @@ export function fillAdditionalQuestions(answers: Record<string, any>) {
       continue;
     }
 
-    // Checkbox (agreement — only suggestion, user must confirm)
+    // Checkbox (agreement)
     const cbEl = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
     if (cbEl) {
       setChecked(cbEl, Boolean(value));
@@ -335,7 +348,7 @@ export function fillAdditionalQuestions(answers: Record<string, any>) {
     // Select / listbox
     const selectEl = container.querySelector<HTMLSelectElement>('select');
     if (selectEl) {
-      setInputValue(selectEl, String(value));
+      setSelectValue(selectEl, String(value));
       continue;
     }
 

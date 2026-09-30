@@ -1,4 +1,5 @@
-import { DecideRequest, DecideResponse } from '@cmt-autofill/contracts';
+import { DecideRequest, DecideResponse, ExtractPdfResponse } from '@cmt-autofill/contracts';
+import pdfParse from 'pdf-parse';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interfaces
@@ -6,6 +7,7 @@ import { DecideRequest, DecideResponse } from '@cmt-autofill/contracts';
 
 export interface OllamaProvider {
   decide(request: DecideRequest): Promise<DecideResponse>;
+  extractPdf(pdfBuffer: Buffer): Promise<ExtractPdfResponse>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,16 +60,11 @@ async function tavilySearch(query: string): Promise<string> {
   const data = await response.json();
   console.log(`[TAVILY] Got answer: ${data.answer ? 'yes' : 'no'}, results: ${data.results?.length ?? 0}`);
 
-  // Return the AI-synthesized answer if available, otherwise concatenate top results
   if (data.answer) return data.answer;
   return (data.results ?? [])
     .map((r: any) => `${r.title}\n${r.content}`)
     .join('\n\n---\n\n');
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool schema passed to Ollama
-// ─────────────────────────────────────────────────────────────────────────────
 
 const TOOLS = [
   {
@@ -95,10 +92,6 @@ const TOOLS = [
   },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// System prompt
-// ─────────────────────────────────────────────────────────────────────────────
-
 function buildSystemPrompt(): string {
   return `You are an expert academic research assistant specializing in paper submissions to academic conferences using the Microsoft CMT (Conference Management Toolkit) platform.
 
@@ -123,13 +116,6 @@ CONFIDENCE SCORING:
 - 0.5–0.69 → Reasonable best guess given available context
 - < 0.5 → Low confidence — the user should review this field manually
 
-FIELD TYPE RULES:
-- "agreement" (checkbox): Suggest true/false; the user must confirm legal/ethical declarations
-- "radio": Return the EXACT id value of the matching radio option from the choices list
-- "dropdown"/"listbox": Return the EXACT id/value of the matching option
-- "text"/"textarea": Return a string answer appropriate for academic writing style
-- "repro": Return a string justification for the reproducibility question
-
 OUTPUT FORMAT:
 Return a single valid JSON object only — no markdown, no code fences, no preamble. Keys are field IDs, values are:
 {
@@ -140,10 +126,6 @@ Return a single valid JSON object only — no markdown, no code fences, no pream
   }
 }`;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// User prompt — includes full paper + all field context
-// ─────────────────────────────────────────────────────────────────────────────
 
 function buildUserPrompt(request: DecideRequest): string {
   const authorsSection = request.authorSummary
@@ -177,10 +159,6 @@ ${JSON.stringify(request.fields, null, 2)}
 Now return a JSON object with an entry for every field ID listed above.`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OllamaCloudProvider
-// ─────────────────────────────────────────────────────────────────────────────
-
 export class OllamaCloudProvider implements OllamaProvider {
   private get apiKey(): string {
     return process.env.OLLAMA_API_KEY || '';
@@ -188,6 +166,97 @@ export class OllamaCloudProvider implements OllamaProvider {
 
   private get model(): string {
     return process.env.MODEL_NAME || 'gemma4:31b';
+  }
+
+  async extractPdf(pdfBuffer: Buffer): Promise<ExtractPdfResponse> {
+    console.log(`\n[OLLAMA PROVIDER] Starting extractPdf()`);
+    console.log(`  PDF Buffer Size: ${pdfBuffer.length} bytes`);
+
+    let pdfText = '';
+    try {
+      const parseFn = (pdfParse as any).default ?? pdfParse;
+      const parsed = await parseFn(pdfBuffer, { max: 2 });
+      pdfText = parsed.text;
+      console.log(`[OLLAMA PROVIDER] Extracted ${pdfText.length} characters from PDF first page(s)`);
+    } catch (err: any) {
+      console.error(`[OLLAMA PROVIDER] PDF parsing failed: ${err.message}`);
+      throw new Error(`Failed to parse PDF file: ${err.message}`);
+    }
+
+    const systemPrompt = `You are an expert academic paper metadata extractor.
+Analyze the provided text from the first page of a research paper.
+Extract the paper title, abstract, and all listed authors with their information.
+
+Return ONLY a valid JSON object matching this exact schema:
+{
+  "title": "Exact paper title",
+  "abstract": "Exact abstract text",
+  "authors": [
+    {
+      "email": "author@domain.com",
+      "firstName": "John",
+      "lastName": "Doe",
+      "organization": "University Name",
+      "countryCode": "IN"
+    }
+  ]
+}
+
+Rules:
+- countryCode MUST be "IN" for all authors.
+- If email is not explicitly in the text for an author, generate a plausible email based on their name and institution.
+- Split full author names accurately into firstName and lastName.
+- Extract ALL authors listed.
+- Return ONLY valid JSON — no markdown, no code fences, no extra text.`;
+
+    const userPrompt = `Extract paper details and author list from the following text:\n\n${pdfText.substring(0, 4000)}`;
+
+    try {
+      const response = await fetch('https://ollama.com/api/chat', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          stream: false,
+          format: 'json',
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Ollama API error: ${response.statusText} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      const rawContent: string = data.message?.content ?? '';
+      console.log(`[OLLAMA PROVIDER] PDF extraction response received`);
+
+      const content = parseModelJson(rawContent);
+
+      return {
+        title: content.title || 'Untitled Paper',
+        abstract: content.abstract || '',
+        authors: Array.isArray(content.authors)
+          ? content.authors.map((a: any) => ({
+              email: a.email || `${(a.firstName || 'author').toLowerCase()}.${(a.lastName || '').toLowerCase()}@example.com`,
+              firstName: a.firstName || 'Author',
+              lastName: a.lastName || '',
+              organization: a.organization || '',
+              countryCode: 'IN',
+            }))
+          : [],
+      };
+    } catch (err: any) {
+      console.error(`[OLLAMA PROVIDER] PDF extraction failed: ${err.message}`);
+      throw err;
+    }
   }
 
   async decide(request: DecideRequest): Promise<DecideResponse> {
@@ -208,7 +277,7 @@ export class OllamaCloudProvider implements OllamaProvider {
       { role: 'user', content: buildUserPrompt(request) },
     ];
 
-    const MAX_ITERATIONS = 6; // max tool-call rounds before forcing final answer
+    const MAX_ITERATIONS = 6;
     let iteration = 0;
 
     try {
@@ -241,11 +310,8 @@ export class OllamaCloudProvider implements OllamaProvider {
         const data = await response.json();
         const assistantMsg = data.message;
 
-        // ── Tool calls? Execute them and loop ─────────────────────────────
         if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
           console.log(`[OLLAMA PROVIDER] Model issued ${assistantMsg.tool_calls.length} tool call(s)`);
-
-          // Push the assistant's tool-call message into history
           messages.push(assistantMsg);
 
           for (const toolCall of assistantMsg.tool_calls) {
@@ -269,11 +335,9 @@ export class OllamaCloudProvider implements OllamaProvider {
             });
           }
 
-          // Continue loop to let the model use the search results
           continue;
         }
 
-        // ── No tool calls — parse the final JSON answer ───────────────────
         const rawContent: string = assistantMsg?.content ?? '';
         console.log(`[OLLAMA PROVIDER] Final response (first 300 chars): ${rawContent.substring(0, 300)}`);
 

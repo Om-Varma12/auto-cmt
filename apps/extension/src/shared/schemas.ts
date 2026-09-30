@@ -13,10 +13,10 @@ export type Author = z.infer<typeof AuthorSchema>;
 export const PaperSchema = z.object({
   title: z.string(),
   abstract: z.string(),
-  keywords: z.array(z.string()),
-  fullText: z.string(),
-  authorIds: z.array(z.string()),
-  primaryContactId: z.string(),
+  keywords: z.array(z.string()).default([]),
+  fullText: z.string().default(''),
+  authorIds: z.array(z.string()).default([]),
+  primaryContactId: z.string().default(''),
 });
 
 export type Paper = z.infer<typeof PaperSchema>;

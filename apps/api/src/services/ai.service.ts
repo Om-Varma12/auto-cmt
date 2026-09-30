@@ -1,4 +1,4 @@
-import { DecideRequest, DecideResponse } from '@cmt-autofill/contracts';
+import { DecideRequest, DecideResponse, ExtractPdfResponse } from '@cmt-autofill/contracts';
 import { OllamaCloudProvider } from '../providers/ollama/index.js';
 
 export class AIService {
@@ -6,5 +6,9 @@ export class AIService {
 
   async decide(request: DecideRequest): Promise<DecideResponse> {
     return this.provider.decide(request);
+  }
+
+  async extractPdf(pdfBuffer: Buffer): Promise<ExtractPdfResponse> {
+    return this.provider.extractPdf(pdfBuffer);
   }
 }
