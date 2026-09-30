@@ -168,7 +168,7 @@ async function addAuthor(author: Author): Promise<boolean> {
     return false;
   }
 
-  await sleep(300); // Let Knockout render the form
+  await sleep(100); // Let Knockout render the form
 
   // — Email —
   const emailInput = form.querySelector<HTMLInputElement>('input[placeholder="Email"]');
@@ -176,7 +176,7 @@ async function addAuthor(author: Author): Promise<boolean> {
     setInputValue(emailInput, author.email);
     emailInput.dispatchEvent(new Event('blur', { bubbles: true }));
   }
-  await sleep(400);
+  await sleep(150);
 
   // — First Name —
   const firstInput = form.querySelector<HTMLInputElement>('input[placeholder="First Name"]');
@@ -195,9 +195,9 @@ async function addAuthor(author: Author): Promise<boolean> {
     const countrySelect = findCountrySelect(form);
     if (countrySelect) {
       let waited = 0;
-      while (countrySelect.options.length <= 1 && waited < 1000) {
-        await sleep(100);
-        waited += 100;
+      while (countrySelect.options.length <= 1 && waited < 500) {
+        await sleep(50);
+        waited += 50;
       }
 
       const matchedValue = matchCountryOption(countrySelect, author.countryCode);
@@ -212,7 +212,7 @@ async function addAuthor(author: Author): Promise<boolean> {
     }
   }
 
-  await sleep(200);
+  await sleep(50);
 
   // Click the inline form's "+ Add" button inside the author form
   const addSubmitBtn = form.querySelector<HTMLButtonElement>('button[type="submit"]');
@@ -222,10 +222,10 @@ async function addAuthor(author: Author): Promise<boolean> {
   }
   addSubmitBtn.click();
 
-  // Wait for the author row to appear in the table
+  // Wait for the author row to appear in the table (fast polling)
   const prevCount = document.querySelectorAll('[id^="autorEmailCell-"]').length;
   for (let i = 0; i < 20; i++) {
-    await sleep(300);
+    await sleep(50);
     const newCount = document.querySelectorAll('[id^="autorEmailCell-"]').length;
     if (newCount > prevCount) {
       console.log(`[CMT FILLER] Successfully added author: ${author.email}`);
