@@ -69,7 +69,7 @@ const Options = () => {
               firstName: a.firstName || '',
               lastName: a.lastName || '',
               organization: a.organization || '',
-              countryCode: a.countryCode || 'IN',
+              countryCode: a.countryCode || 'India',
             })),
             primaryAuthorIndex: 0, // default first author as primary
           });
@@ -96,7 +96,7 @@ const Options = () => {
       ...extractedData,
       authors: [
         ...extractedData.authors,
-        { email: '', firstName: '', lastName: '', organization: '', countryCode: 'IN' }
+        { email: '', firstName: '', lastName: '', organization: '', countryCode: 'India' }
       ]
     });
   };
@@ -365,7 +365,7 @@ const Options = () => {
                         style={inputStyle}
                       />
                       <input
-                        placeholder="Country Code (e.g. IN)"
+                        placeholder="Country (e.g. India)"
                         value={author.countryCode}
                         onChange={e => updateExtractedAuthor(index, 'countryCode', e.target.value)}
                         style={inputStyle}

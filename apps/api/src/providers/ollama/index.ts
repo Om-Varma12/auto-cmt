@@ -1,5 +1,5 @@
 import { DecideRequest, DecideResponse, ExtractPdfResponse } from '@cmt-autofill/contracts';
-import pdfParse from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interfaces
@@ -173,14 +173,20 @@ export class OllamaCloudProvider implements OllamaProvider {
     console.log(`  PDF Buffer Size: ${pdfBuffer.length} bytes`);
 
     let pdfText = '';
+    let parser: PDFParse | null = null;
+
     try {
-      const parseFn = (pdfParse as any).default ?? pdfParse;
-      const parsed = await parseFn(pdfBuffer, { max: 2 });
-      pdfText = parsed.text;
-      console.log(`[OLLAMA PROVIDER] Extracted ${pdfText.length} characters from PDF first page(s)`);
+      parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
+      const textResult = await parser.getText({ partial: [1] });
+      pdfText = textResult.text || '';
+      console.log(`[OLLAMA PROVIDER] Extracted ${pdfText.length} characters from PDF Page 1`);
     } catch (err: any) {
       console.error(`[OLLAMA PROVIDER] PDF parsing failed: ${err.message}`);
       throw new Error(`Failed to parse PDF file: ${err.message}`);
+    } finally {
+      if (parser) {
+        await parser.destroy().catch(() => {});
+      }
     }
 
     const systemPrompt = `You are an expert academic paper metadata extractor.
@@ -197,13 +203,13 @@ Return ONLY a valid JSON object matching this exact schema:
       "firstName": "John",
       "lastName": "Doe",
       "organization": "University Name",
-      "countryCode": "IN"
+      "countryCode": "India"
     }
   ]
 }
 
 Rules:
-- countryCode MUST be "IN" for all authors.
+- countryCode MUST be "India" for all authors.
 - If email is not explicitly in the text for an author, generate a plausible email based on their name and institution.
 - Split full author names accurately into firstName and lastName.
 - Extract ALL authors listed.
@@ -249,7 +255,7 @@ Rules:
               firstName: a.firstName || 'Author',
               lastName: a.lastName || '',
               organization: a.organization || '',
-              countryCode: 'IN',
+              countryCode: 'India',
             }))
           : [],
       };

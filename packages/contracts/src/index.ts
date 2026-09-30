@@ -90,7 +90,7 @@ export const ExtractedAuthorSchema = z.object({
   firstName: z.string(),
   lastName: z.string(),
   organization: z.string(),
-  countryCode: z.string().default('IN'),
+  countryCode: z.string().default('India'),
 });
 
 export type ExtractedAuthor = z.infer<typeof ExtractedAuthorSchema>;
