@@ -19,3 +19,25 @@ export const decideController = async (req: Request, res: Response) => {
     res.status(400).json({ error: error.message });
   }
 };
+
+export const extractPdfController = async (req: Request, res: Response) => {
+  console.log(`\n--------------------------------------------------`);
+  console.log(`[AI CONTROLLER] Incoming /api/v1/ai/extract-pdf request`);
+
+  try {
+    const { pdfBase64 } = req.body;
+    if (!pdfBase64) {
+      res.status(400).json({ error: 'pdfBase64 is required in request body' });
+      return;
+    }
+
+    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+    console.log(`[AI CONTROLLER] Received PDF payload (${pdfBuffer.length} bytes)`);
+
+    const result = await aiService.extractPdf(pdfBuffer);
+    res.json(result);
+  } catch (error: any) {
+    console.error(`[AI CONTROLLER ERROR] ${error.message}`);
+    res.status(400).json({ error: error.message });
+  }
+};

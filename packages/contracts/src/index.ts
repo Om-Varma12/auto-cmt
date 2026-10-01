@@ -47,7 +47,7 @@ export const DecisionSchema = z.object({
   value: z.any(),
   confidence: z.number().min(0).max(1),
   reason: z.string().optional(),
-  engine: z.enum(['ollama', 'jev']),
+  engine: z.enum(['ollama', 'jev']).optional(),
   model: z.string().optional(),
   escalated: z.boolean().optional(),
 });
@@ -76,9 +76,29 @@ export const DecideRequestSchema = z.object({
 export type DecideRequest = z.infer<typeof DecideRequestSchema>;
 
 export const DecideResponseSchema = z.object({
-  answers: z.record(z.string(), DecisionSchema),
+  answers: z.record(z.string(), z.any()),
   model: z.string(),
   requestId: z.string(),
 });
 
 export type DecideResponse = z.infer<typeof DecideResponseSchema>;
+
+// --- PDF Extraction Schema ---
+
+export const ExtractedAuthorSchema = z.object({
+  email: z.string(),
+  firstName: z.string(),
+  lastName: z.string(),
+  organization: z.string(),
+  countryCode: z.string().default('India'),
+});
+
+export type ExtractedAuthor = z.infer<typeof ExtractedAuthorSchema>;
+
+export const ExtractPdfResponseSchema = z.object({
+  title: z.string(),
+  abstract: z.string(),
+  authors: z.array(ExtractedAuthorSchema),
+});
+
+export type ExtractPdfResponse = z.infer<typeof ExtractPdfResponseSchema>;

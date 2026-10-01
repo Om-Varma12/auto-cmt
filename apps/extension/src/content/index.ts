@@ -6,6 +6,9 @@ import {
   fillAdditionalQuestions,
 } from './cmt-logic';
 import { getSelectedPaper, getAuthors } from '../shared/api-helpers';
+import { storage } from '../storage';
+import { getPdfBlob } from '../storage/indexed-db';
+import { uploadPdfToCmt, UploadResult } from './pdf-uploader';
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'EXECUTE') {
@@ -18,10 +21,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function runFillPipeline(sendResponse: (r: any) => void) {
   try {
     // ── Load stored data ──────────────────────────────────────────────────
-    const [paper, authors] = await Promise.all([getSelectedPaper(), getAuthors()]);
+    const [paper, authors, settings] = await Promise.all([
+      getSelectedPaper(),
+      getAuthors(),
+      storage.getSettings(),
+    ]);
 
     if (!paper) {
-      sendResponse({ status: 'error', error: 'No paper found. Add a paper in extension options.' });
+      sendResponse({ status: 'error', error: 'No paper found. Upload a paper PDF in extension options.' });
       return;
     }
 
@@ -32,24 +39,56 @@ async function runFillPipeline(sendResponse: (r: any) => void) {
     await fillTitleAndAbstract(paper);
 
     console.log('[CONTENT] Step 2: Adding co-authors...');
-    // Only add co-authors — the logged-in user is already author[0]
     const coAuthors = authors.filter(a => a.email !== paper.primaryContactId);
     await fillAuthors(coAuthors);
 
-    // ── STEP 3: Scrape additional questions ───────────────────────────────
-    console.log('[CONTENT] Step 3: Scraping additional questions for LLM...');
+    // ── STEP 3: Automatic PDF Attachment (Controlled by autoUploadPdf setting)
+    let pdfResult: UploadResult = { status: 'disabled' };
+    if (!settings.autoUploadPdf) {
+      console.log('[CONTENT] PDF auto-upload is OFF in settings.');
+      pdfResult = {
+        status: 'disabled',
+        message: 'PDF auto-upload is OFF. Please upload PDF manually.',
+      };
+    } else {
+      console.log(`[CONTENT] PDF auto-upload is ON — attempting to attach PDF for paper ID: ${paper.id}...`);
+      const storedPdf = await getPdfBlob(paper.id).catch(() => null);
+      if (!storedPdf || !storedPdf.blob) {
+        console.warn('[CONTENT] No PDF blob found in IndexedDB storage.');
+        pdfResult = {
+          status: 'manual-required',
+          message: 'PDF could not be attached automatically. Please upload it manually.',
+        };
+      } else {
+        const file = new File([storedPdf.blob], storedPdf.fileName, { type: 'application/pdf' });
+        pdfResult = await uploadPdfToCmt(file);
+      }
+    }
+
+    if (pdfResult.status === 'uploaded') {
+      console.log(`[CONTENT] ✅ PDF Attachment Success: ${pdfResult.message} (${pdfResult.method})`);
+    } else if (pdfResult.status === 'failed' || pdfResult.status === 'manual-required') {
+      console.warn(`[CONTENT] ⚠️ PDF Attachment Warning: PDF could not be attached automatically. Please upload it manually.`);
+    }
+
+    // ── STEP 4: Scrape additional questions for LLM ────────────────────────
+    console.log('[CONTENT] Step 4: Scraping additional questions for LLM...');
     const additionalFields = scrapeAdditionalQuestions();
     const meta = scrapeFormMeta();
 
     if (additionalFields.length === 0) {
       console.log('[CONTENT] No additional questions found. Done without LLM call.');
-      sendResponse({ status: 'success', model: 'none (deterministic only)' });
+      sendResponse({
+        status: 'success',
+        model: 'none (deterministic only)',
+        pdfUpload: pdfResult,
+      });
       return;
     }
 
     console.log(`[CONTENT] Found ${additionalFields.length} additional fields — calling LLM via background...`);
 
-    // ── STEP 4: LLM call (routed through background service worker) ───────
+    // ── STEP 5: LLM call (routed through background service worker) ───────
     const payload = {
       paper: {
         title: paper.title,
@@ -71,22 +110,26 @@ async function runFillPipeline(sendResponse: (r: any) => void) {
 
     chrome.runtime.sendMessage({ type: 'DECIDE', payload }, (bgResponse) => {
       if (chrome.runtime.lastError) {
-        sendResponse({ status: 'error', error: chrome.runtime.lastError.message });
+        sendResponse({ status: 'error', error: chrome.runtime.lastError.message, pdfUpload: pdfResult });
         return;
       }
 
       if (bgResponse?.status !== 'success') {
-        sendResponse({ status: 'error', error: bgResponse?.error || 'LLM request failed' });
+        sendResponse({ status: 'error', error: bgResponse?.error || 'LLM request failed', pdfUpload: pdfResult });
         return;
       }
 
-      // ── STEP 5: Fill additional questions with LLM answers ────────────
-      console.log('[CONTENT] Step 5: Filling additional questions from LLM answers...');
+      // ── STEP 6: Fill additional questions with LLM answers ────────────
+      console.log('[CONTENT] Step 6: Filling additional questions from LLM answers...');
       try {
         fillAdditionalQuestions(bgResponse.data.answers);
-        sendResponse({ status: 'success', model: bgResponse.data.model });
+        sendResponse({
+          status: 'success',
+          model: bgResponse.data.model,
+          pdfUpload: pdfResult,
+        });
       } catch (err: any) {
-        sendResponse({ status: 'error', error: `Fill error: ${err.message}` });
+        sendResponse({ status: 'error', error: `Fill error: ${err.message}`, pdfUpload: pdfResult });
       }
     });
 
