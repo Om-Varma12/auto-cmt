@@ -2,7 +2,7 @@ import { defineManifest } from '@crxjs/vite-plugin';
 
 export default defineManifest({
   manifest_version: 3,
-  name: 'CMT Autofill',
+  name: 'auto-cmt',
   version: '0.1.0',
   permissions: ['storage', 'unlimitedStorage'],
   host_permissions: [
