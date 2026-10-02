@@ -40,7 +40,9 @@ export async function savePdfBlob(paperId: string, blob: Blob, fileName: string)
       updatedAt: Date.now(),
     };
     // Save under paperId as well as DEFAULT_KEY for backwards compatibility
-    store.put(data, paperId);
+    if (paperId && paperId !== DEFAULT_KEY) {
+      store.put(data, paperId);
+    }
     const req = store.put(data, DEFAULT_KEY);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
@@ -52,21 +54,45 @@ export async function getPdfBlob(paperId?: string): Promise<StoredPdf | null> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readonly');
     const store = tx.objectStore(STORE_NAME);
-    const keyToUse = paperId || DEFAULT_KEY;
-    const req = store.get(keyToUse);
-    req.onsuccess = () => {
-      if (req.result) {
-        resolve(req.result);
-      } else if (paperId && paperId !== DEFAULT_KEY) {
-        // Fallback to DEFAULT_KEY if specific paperId is not found
-        const fallbackReq = store.get(DEFAULT_KEY);
-        fallbackReq.onsuccess = () => resolve(fallbackReq.result || null);
-        fallbackReq.onerror = () => resolve(null);
-      } else {
-        resolve(null);
-      }
+
+    const checkAnyCursor = () => {
+      const cursorReq = store.openCursor();
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (cursor && cursor.value && cursor.value.blob) {
+          resolve(cursor.value);
+        } else {
+          resolve(null);
+        }
+      };
+      cursorReq.onerror = () => resolve(null);
     };
-    req.onerror = () => reject(req.error);
+
+    const checkDefaultKey = () => {
+      const defReq = store.get(DEFAULT_KEY);
+      defReq.onsuccess = () => {
+        if (defReq.result && defReq.result.blob) {
+          resolve(defReq.result);
+        } else {
+          checkAnyCursor();
+        }
+      };
+      defReq.onerror = () => checkAnyCursor();
+    };
+
+    if (paperId) {
+      const req = store.get(paperId);
+      req.onsuccess = () => {
+        if (req.result && req.result.blob) {
+          resolve(req.result);
+        } else {
+          checkDefaultKey();
+        }
+      };
+      req.onerror = () => checkDefaultKey();
+    } else {
+      checkDefaultKey();
+    }
   });
 }
 
@@ -75,7 +101,7 @@ export async function deletePdfBlob(paperId: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
-    store.delete(paperId);
+    if (paperId) store.delete(paperId);
     const req = store.delete(DEFAULT_KEY);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);

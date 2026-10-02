@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { storage } from '../storage';
-import { savePdfBlob, deletePdfBlob } from '../storage/indexed-db';
 import { Author, Paper, ExtensionSettings } from '../shared/schemas';
 
 const Options = () => {
@@ -57,8 +56,14 @@ const Options = () => {
 
     const reader = new FileReader();
     reader.onload = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(',')[1];
+
+      // Save base64 immediately to chrome.storage.local (accessible from content scripts)
+      storage.savePdfBase64('temp_pending_pdf', base64, file.name).catch(err => {
+        console.warn('[OPTIONS] Failed to save pending PDF base64 to storage:', err);
+      });
+
       chrome.runtime.sendMessage(
         { type: 'EXTRACT_PDF', payload: { pdfBase64: base64 } },
         (response) => {
@@ -142,10 +147,12 @@ const Options = () => {
 
     const newPaperId = 'paper_' + Date.now();
 
-    // Persist PDF Blob into IndexedDB under newPaperId
-    if (currentPendingFile) {
-      await savePdfBlob(newPaperId, currentPendingFile, currentPendingFile.name).catch(err => {
-        console.warn('[OPTIONS] Failed to save PDF Blob to IndexedDB:', err);
+    // Persist PDF as base64 in chrome.storage.local under the real paperId
+    // (chrome.storage.local is shared across all extension contexts including content scripts)
+    const pendingPdf = await storage.getPdfBase64('temp_pending_pdf').catch(() => null);
+    if (pendingPdf) {
+      await storage.savePdfBase64(newPaperId, pendingPdf.base64, pendingPdf.fileName).catch(err => {
+        console.warn('[OPTIONS] Failed to save PDF base64 to storage:', err);
       });
     }
 
@@ -178,6 +185,11 @@ const Options = () => {
   const selectActivePaper = async (paperId: string) => {
     setSelectedPaperId(paperId);
     await storage.setSelectedPaperId(paperId);
+    // Also update pdf_b64_active to point to this paper's PDF
+    const pdf = await storage.getPdfBase64(paperId).catch(() => null);
+    if (pdf) {
+      await storage.savePdfBase64(paperId, pdf.base64, pdf.fileName).catch(() => {});
+    }
     const targetPaper = papers.find(p => p.id === paperId);
     showToast(`⭐ Selected "${targetPaper?.title || 'Paper'}" for automation execution`);
   };
@@ -187,7 +199,7 @@ const Options = () => {
     const updatedPapers = papers.filter(p => p.id !== paperId);
     setPapers(updatedPapers);
     await storage.savePapers(updatedPapers);
-    await deletePdfBlob(paperId).catch(() => {});
+    await storage.deletePdfBase64(paperId).catch(() => {});
 
     if (selectedPaperId === paperId) {
       const nextId = updatedPapers.length > 0 ? updatedPapers[0].id : null;
