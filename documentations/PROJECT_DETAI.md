@@ -1,4 +1,4 @@
-# CMT Autofill — Project Detail
+# auto-cmt — Project Detail
 
 > Working title. Full-stack monorepo with a Chrome extension frontend and a Node/Express backend service that fills Microsoft CMT paper-submission forms using the user's Ollama Cloud API key and Gemma 4, then hands control back to the user to review and submit.
 

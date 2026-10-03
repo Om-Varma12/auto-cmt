@@ -23,7 +23,7 @@ const Popup = () => {
 
   return (
     <div style={{ padding: '1rem', width: '200px', fontFamily: 'sans-serif' }}>
-      <h3>CMT Autofill</h3>
+      <h3 style={{ margin: 0 }}>auto-cmt</h3>
       <button
         onClick={handleExecute}
         style={{

@@ -1,40 +1,51 @@
+/**
+ * ai-provider.ts
+ *
+ * Port of apps/api/src/providers/ollama/index.ts to the MV3 service worker.
+ *
+ * Deviations from the backend (1:1 behavior preserved in all other respects):
+ *  [D1] pdf-parse (Node) → pdf-extractor.ts (pdfjs-dist, browser-native)
+ *  [D2] Buffer.from(base64, 'base64') → handled inside pdf-extractor.ts
+ *  [D3] process.env.OLLAMA_API_KEY / TAVILY_API_KEY / MODEL_NAME
+ *       → chrome.storage reads via key-store.ts / storage module
+ *
+ * Prompts, constants, thresholds, JSON parsing, retry logic, tool schema,
+ * and all validation rules are identical to the backend.
+ */
+
 import { DecideRequest, DecideResponse, ExtractPdfResponse } from '@cmt-autofill/contracts';
-import { PDFParse } from 'pdf-parse';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Interfaces
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface OllamaProvider {
-  decide(request: DecideRequest): Promise<DecideResponse>;
-  extractPdf(pdfBuffer: Buffer): Promise<ExtractPdfResponse>;
-}
+import { extractTextFromPdfBase64 } from './pdf-extractor';
+import { loadApiKey } from './key-store';
+import { storage } from '../storage';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON parsing — strips markdown code fences the model may wrap output in
+// (identical to backend)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function parseModelJson(raw: string): Record<string, any> {
+export function parseModelJson(raw: string): Record<string, any> {
   const trimmed = raw.trim();
   const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/i);
   const jsonStr = fenceMatch ? fenceMatch[1].trim() : trimmed;
   try {
     return JSON.parse(jsonStr);
   } catch (err: any) {
-    console.error(`[OLLAMA PROVIDER] JSON parse failed. Raw content (first 500 chars):\n${raw.substring(0, 500)}`);
+    console.error(`[AI PROVIDER] JSON parse failed. Raw content (first 500 chars):\n${raw.substring(0, 500)}`);
     throw new Error(`Model returned invalid JSON: ${err.message}`);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tavily web search tool
+// [D3] process.env.TAVILY_API_KEY → loadApiKey('tavily') from chrome.storage
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function tavilySearch(query: string): Promise<string> {
-  const apiKey = process.env.TAVILY_API_KEY;
+  // [D3] Read from chrome.storage instead of process.env
+  const apiKey = await loadApiKey('tavily');
   if (!apiKey) {
-    console.warn('[TAVILY] TAVILY_API_KEY not set — returning empty search result');
-    return 'Search unavailable: TAVILY_API_KEY not configured.';
+    console.warn('[TAVILY] Tavily API key not configured — skipping web search');
+    return 'Search unavailable: Tavily API key not configured.';
   }
 
   console.log(`[TAVILY] Searching: "${query}"`);
@@ -66,7 +77,11 @@ async function tavilySearch(query: string): Promise<string> {
     .join('\n\n---\n\n');
 }
 
-const TOOLS = [
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool schema — identical to backend
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const TOOLS = [
   {
     type: 'function',
     function: {
@@ -92,7 +107,11 @@ const TOOLS = [
   },
 ];
 
-function buildSystemPrompt(): string {
+// ─────────────────────────────────────────────────────────────────────────────
+// Prompts — identical to backend
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function buildSystemPrompt(): string {
   return `You are an expert academic research assistant specializing in paper submissions to academic conferences using the Microsoft CMT (Conference Management Toolkit) platform.
 
 YOUR ROLE:
@@ -127,7 +146,7 @@ Return a single valid JSON object only — no markdown, no code fences, no pream
 }`;
 }
 
-function buildUserPrompt(request: DecideRequest): string {
+export function buildUserPrompt(request: DecideRequest): string {
   const authorsSection = request.authorSummary
     ? `AUTHOR INFORMATION:
 Emails: ${request.authorSummary.emails.join(', ')}
@@ -159,36 +178,44 @@ ${JSON.stringify(request.fields, null, 2)}
 Now return a JSON object with an entry for every field ID listed above.`;
 }
 
-export class OllamaCloudProvider implements OllamaProvider {
-  private get apiKey(): string {
-    return process.env.OLLAMA_API_KEY || '';
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider — identical logic to backend, env vars replaced by storage reads
+// ─────────────────────────────────────────────────────────────────────────────
+
+const OLLAMA_API_URL = 'https://ollama.com/api/chat';
+const MAX_ITERATIONS = 6; // identical to backend
+
+export class OllamaProvider {
+  // [D3] process.env.OLLAMA_API_KEY → chrome.storage read via key-store
+  private async getApiKey(): Promise<string> {
+    return loadApiKey('ollama');
   }
 
-  private get model(): string {
-    return process.env.MODEL_NAME || 'gemma4:31b';
+  // [D3] process.env.MODEL_NAME → chrome.storage.local settings read
+  private async getModel(): Promise<string> {
+    const settings = await storage.getSettings();
+    return settings.modelName || 'gemma4:31b';
   }
 
-  async extractPdf(pdfBuffer: Buffer): Promise<ExtractPdfResponse> {
-    console.log(`\n[OLLAMA PROVIDER] Starting extractPdf()`);
-    console.log(`  PDF Buffer Size: ${pdfBuffer.length} bytes`);
+  // ── extractPdf ─────────────────────────────────────────────────────────────
+  // [D1][D2] pdf-parse + Buffer → pdfjs-dist + Uint8Array (in pdf-extractor.ts)
+  async extractPdf(pdfBase64: string): Promise<ExtractPdfResponse> {
+    console.log('\n[AI PROVIDER] Starting extractPdf()');
 
+    // [D1][D2] Browser-native PDF text extraction
     let pdfText = '';
-    let parser: PDFParse | null = null;
-
     try {
-      parser = new PDFParse({ data: new Uint8Array(pdfBuffer) });
-      const textResult = await parser.getText({ partial: [1] });
-      pdfText = textResult.text || '';
-      console.log(`[OLLAMA PROVIDER] Extracted ${pdfText.length} characters from PDF Page 1`);
+      pdfText = await extractTextFromPdfBase64(pdfBase64);
+      console.log(`[AI PROVIDER] Extracted ${pdfText.length} characters from PDF Page 1`);
     } catch (err: any) {
-      console.error(`[OLLAMA PROVIDER] PDF parsing failed: ${err.message}`);
+      console.error(`[AI PROVIDER] PDF parsing failed: ${err.message}`);
       throw new Error(`Failed to parse PDF file: ${err.message}`);
-    } finally {
-      if (parser) {
-        await parser.destroy().catch(() => {});
-      }
     }
 
+    const apiKey = await this.getApiKey();
+    const model = await this.getModel();
+
+    // Prompt identical to backend
     const systemPrompt = `You are an expert academic paper metadata extractor.
 Analyze the provided text from the first page of a research paper.
 Extract the paper title, abstract, and all listed authors with their information.
@@ -218,14 +245,17 @@ Rules:
     const userPrompt = `Extract paper details and author list from the following text:\n\n${pdfText.substring(0, 4000)}`;
 
     try {
-      const response = await fetch('https://ollama.com/api/chat', {
+      const response = await fetch(OLLAMA_API_URL, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
+          // NOTE: Direct browser-to-Ollama-Cloud call with user's own key,
+          // held locally in encrypted storage. The user has consented to this
+          // by entering their key in the extension's options page.
+          'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: this.model,
+          model,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
@@ -242,7 +272,7 @@ Rules:
 
       const data = await response.json();
       const rawContent: string = data.message?.content ?? '';
-      console.log(`[OLLAMA PROVIDER] PDF extraction response received`);
+      console.log('[AI PROVIDER] PDF extraction response received');
 
       const content = parseModelJson(rawContent);
 
@@ -255,24 +285,28 @@ Rules:
               firstName: a.firstName || 'Author',
               lastName: a.lastName || '',
               organization: a.organization || '',
-              countryCode: 'India',
+              countryCode: 'India', // always India per business rule
             }))
           : [],
       };
     } catch (err: any) {
-      console.error(`[OLLAMA PROVIDER] PDF extraction failed: ${err.message}`);
+      console.error(`[AI PROVIDER] PDF extraction failed: ${err.message}`);
       throw err;
     }
   }
 
+  // ── decide ─────────────────────────────────────────────────────────────────
   async decide(request: DecideRequest): Promise<DecideResponse> {
-    const hasApiKey = Boolean(this.apiKey?.trim());
-    const maskedKey = hasApiKey
-      ? `${this.apiKey.substring(0, 4)}...${this.apiKey.substring(this.apiKey.length - 4)}`
+    const apiKey = await this.getApiKey();
+    const model = await this.getModel();
+
+    // Never log the full key — masked display only (identical to backend)
+    const maskedKey = apiKey
+      ? `${apiKey.substring(0, 4)}...${apiKey.substring(apiKey.length - 4)}`
       : 'NOT_SET';
 
-    console.log(`\n[OLLAMA PROVIDER] Starting decide()`);
-    console.log(`  Model:       ${this.model}`);
+    console.log('\n[AI PROVIDER] Starting decide()');
+    console.log(`  Model:       ${model}`);
     console.log(`  API Key:     ${maskedKey}`);
     console.log(`  Conference:  ${request.conference.name}`);
     console.log(`  Fields:      ${request.fields.length}`);
@@ -283,33 +317,32 @@ Rules:
       { role: 'user', content: buildUserPrompt(request) },
     ];
 
-    const MAX_ITERATIONS = 6;
     let iteration = 0;
 
     try {
       while (iteration < MAX_ITERATIONS) {
         iteration++;
-        console.log(`\n[OLLAMA PROVIDER] Iteration ${iteration} — sending ${messages.length} messages`);
+        console.log(`\n[AI PROVIDER] Iteration ${iteration} — sending ${messages.length} messages`);
 
-        const response = await fetch('https://ollama.com/api/chat', {
+        const response = await fetch(OLLAMA_API_URL, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
+            'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: this.model,
+            model,
             messages,
             tools: TOOLS,
             stream: false,
           }),
         });
 
-        console.log(`[OLLAMA PROVIDER] HTTP ${response.status} ${response.statusText}`);
+        console.log(`[AI PROVIDER] HTTP ${response.status} ${response.statusText}`);
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error(`[OLLAMA PROVIDER ERROR] ${response.status}: ${errorText}`);
+          console.error(`[AI PROVIDER ERROR] ${response.status}: ${errorText}`);
           throw new Error(`Ollama API error: ${response.statusText}`);
         }
 
@@ -317,21 +350,21 @@ Rules:
         const assistantMsg = data.message;
 
         if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
-          console.log(`[OLLAMA PROVIDER] Model issued ${assistantMsg.tool_calls.length} tool call(s)`);
+          console.log(`[AI PROVIDER] Model issued ${assistantMsg.tool_calls.length} tool call(s)`);
           messages.push(assistantMsg);
 
           for (const toolCall of assistantMsg.tool_calls) {
             const fnName = toolCall.function?.name;
-            const args   = toolCall.function?.arguments ?? {};
+            const args = toolCall.function?.arguments ?? {};
 
-            console.log(`[OLLAMA PROVIDER] Tool call: ${fnName}(${JSON.stringify(args)})`);
+            console.log(`[AI PROVIDER] Tool call: ${fnName}(${JSON.stringify(args)})`);
 
             let toolResult = '';
             if (fnName === 'web_search') {
               toolResult = await tavilySearch(args.query ?? '');
             } else {
               toolResult = `Unknown tool: ${fnName}`;
-              console.warn(`[OLLAMA PROVIDER] Unknown tool requested: ${fnName}`);
+              console.warn(`[AI PROVIDER] Unknown tool requested: ${fnName}`);
             }
 
             messages.push({
@@ -345,23 +378,56 @@ Rules:
         }
 
         const rawContent: string = assistantMsg?.content ?? '';
-        console.log(`[OLLAMA PROVIDER] Final response (first 300 chars): ${rawContent.substring(0, 300)}`);
+        console.log(`[AI PROVIDER] Final response (first 300 chars): ${rawContent.substring(0, 300)}`);
 
         const content = parseModelJson(rawContent);
-        console.log(`[OLLAMA PROVIDER SUCCESS] Decisions for ${Object.keys(content).length} fields`);
+        console.log(`[AI PROVIDER SUCCESS] Decisions for ${Object.keys(content).length} fields`);
 
         return {
           answers: content,
-          model: this.model,
+          model,
           requestId: Math.random().toString(36).substring(7),
         };
       }
 
       throw new Error(`Ollama exceeded ${MAX_ITERATIONS} tool-call iterations without a final answer`);
-
     } catch (err: any) {
-      console.error(`[OLLAMA PROVIDER FAILED] ${err.message}`);
+      console.error(`[AI PROVIDER FAILED] ${err.message}`);
       throw err;
     }
   }
+
+  /**
+   * Tests connectivity with the stored Ollama API key.
+   * Used by the TEST_CONNECTION service worker message handler.
+   * The key is read from storage here — never passed through messages.
+   */
+  async testConnection(model: string): Promise<{ ok: boolean; model: string; latencyMs: number }> {
+    const apiKey = await this.getApiKey();
+    if (!apiKey) throw new Error('No Ollama API key configured. Please set it in Options.');
+
+    const t0 = Date.now();
+    const response = await fetch(OLLAMA_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'Reply with only the word "ok"' }],
+        stream: false,
+        options: { num_predict: 4 }, // cap tokens for test call
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Ollama API returned ${response.status}: ${errText.substring(0, 200)}`);
+    }
+
+    return { ok: true, model, latencyMs: Date.now() - t0 };
+  }
 }
+
+export const ollamaProvider = new OllamaProvider();

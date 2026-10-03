@@ -67,7 +67,32 @@ export function waitForUploadSuccess(
 }
 
 /**
- * Strategy 1: Upload via CMT's file input (`#submissionFormFile`)
+ * Helper to safely create synthetic DragEvents without throwing TypeError on read-only dataTransfer getter.
+ */
+function createSyntheticDragEvent(type: string, dataTransfer: any): Event {
+  let evt: Event;
+  try {
+    evt = new DragEvent(type, { bubbles: true, cancelable: true });
+  } catch (_e) {
+    evt = new Event(type, { bubbles: true, cancelable: true });
+  }
+
+  try {
+    Object.defineProperty(evt, 'dataTransfer', {
+      value: dataTransfer,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  } catch (_e) {
+    (evt as any).dataTransfer = dataTransfer;
+  }
+
+  return evt;
+}
+
+/**
+ * Strategy 1: Upload via CMT's file input (`#submissionFormFile` or dynamic input)
  * Uses DataTransfer to assign input.files and dispatches native 'change' event.
  */
 async function tryFileInputUpload(
@@ -76,9 +101,27 @@ async function tryFileInputUpload(
   doc: Document,
   timeoutMs = 5000
 ): Promise<boolean> {
-  const fileInput = doc.querySelector<HTMLInputElement>(
+  let fileInput = doc.querySelector<HTMLInputElement>(
     '#submissionFormFile, input[type="file"][id*="File"], input[type="file"]'
   );
+
+  // If input not immediately in DOM, click "Upload from Computer" button inside drop box to trigger Knockout input creation
+  if (!fileInput) {
+    const uploadBtn = doc.querySelector<HTMLButtonElement>(
+      '#fileDropBox button, button[data-bind*="uploadFile"]'
+    );
+    if (uploadBtn) {
+      console.log('[PDF UPLOADER] File input not immediately in DOM. Triggering "Upload from Computer" button...');
+      try {
+        uploadBtn.click();
+        await new Promise(r => setTimeout(r, 200));
+        fileInput = doc.querySelector<HTMLInputElement>('input[type="file"]');
+      } catch (_e) {
+        // continue to check fallback
+      }
+    }
+  }
+
   if (!fileInput) {
     console.warn('[PDF UPLOADER] File input (#submissionFormFile) not found in DOM');
     return false;
@@ -110,7 +153,7 @@ async function tryFileInputUpload(
 
 /**
  * Strategy 2: Upload via CMT's Drag & Drop area (`#fileDropBox`)
- * Constructs DataTransfer and dispatches synthetic 'dragover' and 'drop' DragEvents.
+ * Constructs DataTransfer and dispatches synthetic 'dragenter', 'dragover', and 'drop' events.
  */
 async function tryDragDropUpload(
   file: File,
@@ -128,22 +171,13 @@ async function tryDragDropUpload(
     const dataTransfer = createDataTransfer();
     dataTransfer.items.add(file);
 
-    const DragEventClass = (typeof DragEvent !== 'undefined' ? DragEvent : Event) as any;
+    const dragEnterEvent = createSyntheticDragEvent('dragenter', dataTransfer);
+    dropBox.dispatchEvent(dragEnterEvent);
 
-    const dragOverEvent = new DragEventClass('dragover', {
-      bubbles: true,
-      cancelable: true,
-      dataTransfer,
-    });
-    dragOverEvent.dataTransfer = dataTransfer;
+    const dragOverEvent = createSyntheticDragEvent('dragover', dataTransfer);
     dropBox.dispatchEvent(dragOverEvent);
 
-    const dropEvent = new DragEventClass('drop', {
-      bubbles: true,
-      cancelable: true,
-      dataTransfer,
-    });
-    dropEvent.dataTransfer = dataTransfer;
+    const dropEvent = createSyntheticDragEvent('drop', dataTransfer);
     dropBox.dispatchEvent(dropEvent);
 
     console.log('[PDF UPLOADER] Dispatched drag & drop events on drop target, verifying DOM upload success...');

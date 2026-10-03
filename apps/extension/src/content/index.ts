@@ -7,7 +7,6 @@ import {
 } from './cmt-logic';
 import { getSelectedPaper, getAuthors } from '../shared/api-helpers';
 import { storage } from '../storage';
-import { getPdfBlob } from '../storage/indexed-db';
 import { uploadPdfToCmt, UploadResult } from './pdf-uploader';
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -52,15 +51,21 @@ async function runFillPipeline(sendResponse: (r: any) => void) {
       };
     } else {
       console.log(`[CONTENT] PDF auto-upload is ON — attempting to attach PDF for paper ID: ${paper.id}...`);
-      const storedPdf = await getPdfBlob(paper.id).catch(() => null);
-      if (!storedPdf || !storedPdf.blob) {
-        console.warn('[CONTENT] No PDF blob found in IndexedDB storage.');
+      // Read from chrome.storage.local (reliably shared across all extension contexts)
+      const storedPdf = await storage.getPdfBase64(paper.id).catch(() => null);
+      if (!storedPdf || !storedPdf.base64) {
+        console.warn('[CONTENT] No PDF base64 found in storage for paper:', paper.id);
         pdfResult = {
           status: 'manual-required',
           message: 'PDF could not be attached automatically. Please upload it manually.',
         };
       } else {
-        const file = new File([storedPdf.blob], storedPdf.fileName, { type: 'application/pdf' });
+        // Convert base64 → Uint8Array → Blob → File
+        const binary = atob(storedPdf.base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: 'application/pdf' });
+        const file = new File([blob], storedPdf.fileName, { type: 'application/pdf' });
         pdfResult = await uploadPdfToCmt(file);
       }
     }

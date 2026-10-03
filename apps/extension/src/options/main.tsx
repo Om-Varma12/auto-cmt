@@ -1,13 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { storage } from '../storage';
-import { savePdfBlob, deletePdfBlob } from '../storage/indexed-db';
 import { Author, Paper, ExtensionSettings } from '../shared/schemas';
+import { saveApiKey, loadApiKey, isApiKeySet } from '../background/key-store';
 
 const Options = () => {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selectedPaperId, setSelectedPaperId] = useState<string | null>(null);
-  const [settings, setSettings] = useState<ExtensionSettings>({ backendBaseUrl: 'http://localhost:3001', autoUploadPdf: false });
+  const [settings, setSettings] = useState<ExtensionSettings>({
+    autoUploadPdf: false,
+    modelName: 'gemma4:31b',
+    rememberApiKey: true,
+  });
+
+  // API Key State
+  const [ollamaKeyInput, setOllamaKeyInput] = useState('');
+  const [tavilyKeyInput, setTavilyKeyInput] = useState('');
+  const [isOllamaKeySaved, setIsOllamaKeySaved] = useState(false);
+  const [isTavilyKeySaved, setIsTavilyKeySaved] = useState(false);
+  const [isTestingConn, setIsTestingConn] = useState(false);
+  const [connStatus, setConnStatus] = useState<string | null>(null);
 
   // PDF Upload & Extraction State
   const [isExtracting, setIsExtracting] = useState(false);
@@ -34,6 +46,12 @@ const Options = () => {
       });
     });
     storage.getSettings().then(setSettings);
+
+    // Load key presence and values if remembered
+    isApiKeySet('ollama').then(setIsOllamaKeySaved);
+    isApiKeySet('tavily').then(setIsTavilyKeySaved);
+    loadApiKey('ollama').then(val => setOllamaKeyInput(val));
+    loadApiKey('tavily').then(val => setTavilyKeyInput(val));
   }, []);
 
   const showToast = (msg: string) => {
@@ -57,8 +75,14 @@ const Options = () => {
 
     const reader = new FileReader();
     reader.onload = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(',')[1];
+
+      // Save base64 immediately to chrome.storage.local (accessible from content scripts)
+      storage.savePdfBase64('temp_pending_pdf', base64, file.name).catch(err => {
+        console.warn('[OPTIONS] Failed to save pending PDF base64 to storage:', err);
+      });
+
       chrome.runtime.sendMessage(
         { type: 'EXTRACT_PDF', payload: { pdfBase64: base64 } },
         (response) => {
@@ -142,10 +166,12 @@ const Options = () => {
 
     const newPaperId = 'paper_' + Date.now();
 
-    // Persist PDF Blob into IndexedDB under newPaperId
-    if (currentPendingFile) {
-      await savePdfBlob(newPaperId, currentPendingFile, currentPendingFile.name).catch(err => {
-        console.warn('[OPTIONS] Failed to save PDF Blob to IndexedDB:', err);
+    // Persist PDF as base64 in chrome.storage.local under the real paperId
+    // (chrome.storage.local is shared across all extension contexts including content scripts)
+    const pendingPdf = await storage.getPdfBase64('temp_pending_pdf').catch(() => null);
+    if (pendingPdf) {
+      await storage.savePdfBase64(newPaperId, pendingPdf.base64, pendingPdf.fileName).catch(err => {
+        console.warn('[OPTIONS] Failed to save PDF base64 to storage:', err);
       });
     }
 
@@ -178,6 +204,11 @@ const Options = () => {
   const selectActivePaper = async (paperId: string) => {
     setSelectedPaperId(paperId);
     await storage.setSelectedPaperId(paperId);
+    // Also update pdf_b64_active to point to this paper's PDF
+    const pdf = await storage.getPdfBase64(paperId).catch(() => null);
+    if (pdf) {
+      await storage.savePdfBase64(paperId, pdf.base64, pdf.fileName).catch(() => {});
+    }
     const targetPaper = papers.find(p => p.id === paperId);
     showToast(`⭐ Selected "${targetPaper?.title || 'Paper'}" for automation execution`);
   };
@@ -187,7 +218,7 @@ const Options = () => {
     const updatedPapers = papers.filter(p => p.id !== paperId);
     setPapers(updatedPapers);
     await storage.savePapers(updatedPapers);
-    await deletePdfBlob(paperId).catch(() => {});
+    await storage.deletePdfBase64(paperId).catch(() => {});
 
     if (selectedPaperId === paperId) {
       const nextId = updatedPapers.length > 0 ? updatedPapers[0].id : null;
@@ -199,10 +230,52 @@ const Options = () => {
     showToast('Paper removed from library');
   };
 
-  const updateBackendUrl = async (url: string) => {
-    const updated = { ...settings, backendBaseUrl: url };
+  const handleSaveOllamaKey = async () => {
+    await saveApiKey('ollama', ollamaKeyInput, settings.rememberApiKey);
+    setIsOllamaKeySaved(Boolean(ollamaKeyInput));
+    showToast(ollamaKeyInput ? '✓ Ollama API Key saved securely!' : 'Ollama API Key removed');
+  };
+
+  const handleSaveTavilyKey = async () => {
+    await saveApiKey('tavily', tavilyKeyInput, settings.rememberApiKey);
+    setIsTavilyKeySaved(Boolean(tavilyKeyInput));
+    showToast(tavilyKeyInput ? '✓ Tavily API Key saved securely!' : 'Tavily API Key removed');
+  };
+
+  const updateModelName = async (modelName: string) => {
+    const updated = { ...settings, modelName };
     setSettings(updated);
     await storage.saveSettings(updated);
+  };
+
+  const updateRememberApiKey = async (rememberApiKey: boolean) => {
+    const updated = { ...settings, rememberApiKey };
+    setSettings(updated);
+    await storage.saveSettings(updated);
+
+    // Re-save existing keys with new persistence setting
+    if (ollamaKeyInput) await saveApiKey('ollama', ollamaKeyInput, rememberApiKey);
+    if (tavilyKeyInput) await saveApiKey('tavily', tavilyKeyInput, rememberApiKey);
+    showToast(`Key persistence is now ${rememberApiKey ? 'ON (Encrypted Local)' : 'OFF (Session Only)'}`);
+  };
+
+  const handleTestConnection = async () => {
+    setIsTestingConn(true);
+    setConnStatus('Testing connection to Ollama Cloud...');
+
+    chrome.runtime.sendMessage(
+      { type: 'TEST_CONNECTION', payload: { model: settings.modelName } },
+      (res) => {
+        setIsTestingConn(false);
+        if (chrome.runtime.lastError) {
+          setConnStatus(`❌ Connection error: ${chrome.runtime.lastError.message}`);
+        } else if (res?.status === 'success') {
+          setConnStatus(`✅ Connection successful! Model "${res.data.model}" responded in ${res.data.latencyMs}ms`);
+        } else {
+          setConnStatus(`❌ Connection failed: ${res?.error || 'Unknown error'}`);
+        }
+      }
+    );
   };
 
   const updateAutoUploadPdf = async (autoUpload: boolean) => {
@@ -573,7 +646,7 @@ const Options = () => {
           )}
         </section>
 
-        {/* Backend & Upload Settings Card */}
+        {/* AI Provider & Extension Settings Card */}
         <section style={{
           backgroundColor: '#ffffff',
           borderRadius: '0.75rem',
@@ -581,22 +654,120 @@ const Options = () => {
           border: '1px solid #e2e8f0',
           boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
         }}>
-          <h2 style={{ fontSize: '1.15rem', fontWeight: '600', color: '#1e293b', marginTop: 0, marginBottom: '1rem' }}>
-            Extension & Attachment Settings
+          <h2 style={{ fontSize: '1.15rem', fontWeight: '600', color: '#1e293b', marginTop: 0, marginBottom: '0.375rem' }}>
+            🔑 AI Provider & Extension Settings
           </h2>
+          <p style={{ color: '#64748b', fontSize: '0.85rem', marginTop: 0, marginBottom: '1.25rem' }}>
+            Configure your AI credentials and options. Keys are stored encrypted locally in your browser.
+          </p>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            
+            {/* Ollama API Key Input */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: '500', color: '#475569' }}>Backend Base URL</label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label style={{ fontSize: '0.85rem', fontWeight: '600', color: '#334155' }}>
+                  Ollama API Key *
+                </label>
+                {isOllamaKeySaved && (
+                  <span style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: '600' }}>
+                    ✓ Key Configured
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input
+                  type="password"
+                  value={ollamaKeyInput}
+                  onChange={e => setOllamaKeyInput(e.target.value)}
+                  placeholder="Paste your Ollama Cloud API key..."
+                  style={inputStyle}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveOllamaKey}
+                  style={smallPrimaryButtonStyle}
+                >
+                  Save Key
+                </button>
+              </div>
+            </div>
+
+            {/* Tavily API Key Input (Optional) */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label style={{ fontSize: '0.85rem', fontWeight: '600', color: '#334155' }}>
+                  Tavily API Key (Optional — for Web Search)
+                </label>
+                {isTavilyKeySaved && (
+                  <span style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: '600' }}>
+                    ✓ Key Configured
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input
+                  type="password"
+                  value={tavilyKeyInput}
+                  onChange={e => setTavilyKeyInput(e.target.value)}
+                  placeholder="Paste your Tavily API key (optional)..."
+                  style={inputStyle}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveTavilyKey}
+                  style={smallPrimaryButtonStyle}
+                >
+                  Save Key
+                </button>
+              </div>
+              <p style={{ color: '#94a3b8', fontSize: '0.75rem', margin: 0 }}>
+                If not entered, web search for conference-specific terms will be automatically skipped.
+              </p>
+            </div>
+
+            {/* Model Selection */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.375rem' }}>
+              <label style={{ fontSize: '0.85rem', fontWeight: '600', color: '#334155' }}>Model Name</label>
               <input
-                type="url"
-                value={settings.backendBaseUrl}
-                onChange={e => updateBackendUrl(e.target.value)}
-                placeholder="http://localhost:3001"
+                type="text"
+                value={settings.modelName}
+                onChange={e => updateModelName(e.target.value)}
+                placeholder="gemma4:31b"
                 style={inputStyle}
               />
             </div>
 
+            {/* Remember API Key Toggle */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '0.875rem 1rem',
+              borderRadius: '0.5rem',
+              backgroundColor: '#f8fafc',
+              border: '1px solid #e2e8f0'
+            }}>
+              <div>
+                <label style={{ fontWeight: '600', color: '#0f172a', fontSize: '0.9rem', cursor: 'pointer' }}>
+                  Remember API Keys
+                </label>
+                <p style={{ color: '#64748b', fontSize: '0.8rem', margin: '0.125rem 0 0 0' }}>
+                  When ON, keys are encrypted (AES-GCM-256) and saved across browser restarts. When OFF, keys are kept in session memory only.
+                </p>
+              </div>
+
+              <input
+                type="checkbox"
+                checked={settings.rememberApiKey ?? true}
+                onChange={e => updateRememberApiKey(e.target.checked)}
+                style={{ width: '20px', height: '20px', cursor: 'pointer' }}
+              />
+            </div>
+
+            {/* Auto Upload PDF Toggle */}
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -622,6 +793,39 @@ const Options = () => {
                 style={{ width: '20px', height: '20px', cursor: 'pointer' }}
               />
             </div>
+
+            {/* Test Connection Button */}
+            <div style={{ paddingTop: '0.5rem' }}>
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={isTestingConn}
+                style={{
+                  ...primaryButtonStyle,
+                  backgroundColor: isTestingConn ? '#94a3b8' : '#0284c7',
+                  width: '100%',
+                }}
+              >
+                {isTestingConn ? '⏳ Testing Connection...' : '🔌 Test API Connection'}
+              </button>
+
+              {connStatus && (
+                <p style={{
+                  fontSize: '0.85rem',
+                  fontWeight: '500',
+                  marginTop: '0.75rem',
+                  marginBottom: 0,
+                  padding: '0.5rem 0.75rem',
+                  borderRadius: '0.375rem',
+                  backgroundColor: connStatus.startsWith('✅') ? '#f0fdf4' : '#fef2f2',
+                  color: connStatus.startsWith('✅') ? '#15803d' : '#991b1b',
+                  border: connStatus.startsWith('✅') ? '1px solid #bbf7d0' : '1px solid #fecaca',
+                }}>
+                  {connStatus}
+                </p>
+              )}
+            </div>
+
           </div>
         </section>
 

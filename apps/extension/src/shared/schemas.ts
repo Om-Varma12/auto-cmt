@@ -24,8 +24,11 @@ export const PaperSchema = z.object({
 export type Paper = z.infer<typeof PaperSchema>;
 
 export const ExtensionSettingsSchema = z.object({
-  backendBaseUrl: z.string().url().default('http://localhost:3001'),
+  // [D4] backendBaseUrl removed — no server needed.
+  // Old stored values with this field are silently stripped by Zod on parse.
   autoUploadPdf: z.boolean().default(false),
+  modelName: z.string().default('gemma4:31b'),
+  rememberApiKey: z.boolean().default(true),
 });
 
 export type ExtensionSettings = z.infer<typeof ExtensionSettingsSchema>;

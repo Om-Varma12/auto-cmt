@@ -1,4 +1,4 @@
-# CMT Autofill — Technical Design
+# auto-cmt — Technical Design
 
 Companion to `PROJECT_DETAIL.md`.
 Status: implementation design for a first full-stack build.
