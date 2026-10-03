@@ -30,7 +30,7 @@ export const storage = {
   },
   async getSettings(): Promise<ExtensionSettings> {
     const data = await chrome.storage.local.get('settings');
-    return data.settings || { backendBaseUrl: 'http://localhost:3001', autoUploadPdf: false };
+    return data.settings || { autoUploadPdf: false, modelName: 'gemma4:31b', rememberApiKey: true };
   },
   async saveSettings(settings: ExtensionSettings): Promise<void> {
     await chrome.storage.local.set({ settings });

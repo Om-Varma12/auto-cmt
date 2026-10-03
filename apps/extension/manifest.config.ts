@@ -7,8 +7,8 @@ export default defineManifest({
   permissions: ['storage', 'unlimitedStorage'],
   host_permissions: [
     'https://cmt3.research.microsoft.com/*',
-    'http://localhost:3001/*',
-    'http://127.0.0.1:3001/*'
+    'https://ollama.com/*',
+    'https://api.tavily.com/*'
   ],
   background: {
     service_worker: 'src/background/index.ts',
